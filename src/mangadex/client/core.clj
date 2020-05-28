@@ -1,12 +1,13 @@
 (ns mangadex.client.core
   (:gen-class)
   (:require [clojure.pprint :refer [pprint]]
-            [clojure.string :refer [join]]
+            [clojure.string :refer [join lower-case]]
             [clojure.java.io :as io]
             [clojure.edn :as edn]
+            [byte-streams :refer [convert stream-of]]
             [manifold.time :refer [every minutes]]
-            [manifold.stream :refer [->source stream connect-via]]
-            [manifold.deferred :refer [chain]]
+            [manifold.deferred :as d]
+            [manifold.stream :refer [buffered-stream consume put! on-drained closed?]]
             [aleph.http :as http]
             [aleph.http.client-middleware :refer [default-middleware]]
             [aleph.netty :as netty]
@@ -16,10 +17,13 @@
             [buddy.core.hash :refer [md5]]
             [shutdown.core :as shutdown]
             [taoensso.timbre :as log]
+            [taoensso.nippy :as nippy]
             )
   (:import [java.util Base64]
            [java.util.concurrent ScheduledThreadPoolExecutor]
+           [javax.xml.bind DatatypeConverter]
            [javax.crypto Cipher CipherInputStream CipherOutputStream]
+           [javax.crypto.spec SecretKeySpec]
            [io.netty.handler.ssl SslContextBuilder]
            [io.netty.handler.traffic GlobalTrafficShapingHandler]
            [com.jakewharton.disklrucache DiskLruCache]
@@ -39,6 +43,12 @@
 (defn encode64 [b]
   (.encodeToString (Base64/getEncoder) b))
 
+(defn decode64 [b]
+  (.decode (Base64/getDecoder) b))
+
+(defn get-cipher [algo secret]
+  (doto (Cipher/getInstance algo)
+    (.init Cipher/ENCRYPT_MODE (SecretKeySpec. secret algo))))
 
 (defn format-pem-string [encoded]
   (let [chunked (->> encoded
@@ -66,31 +76,57 @@
         bandwidth-limiter (GlobalTrafficShapingHandler. executor burst-limit 0 1000 10000)
         egress-limiter (GlobalTrafficShapingHandler. executor egress-limit 0 60000 1)
         cache-size (-> config :cache-size (* 1024 1024))
-        cache (DiskLruCache/open (io/file "data") 0 1 cache-size)
+        cache (DiskLruCache/open (io/file "data") 0 2 cache-size)
         ]
 
     (defroutes http-handler
       (GET "/data/:chapter/:image" [chapter image :as req]
            (log/info (str "GET " (:uri req)))
            (let [cache-key (md5 (str chapter image))
-                 rc4 (doto (Cipher/getInstance "RC4")
-                       (.init Cipher/ENCRYPT_MODE cache-key))]
-             (if-let [entry (.get cache cache-key)]
-               {:body (-> entry
-                          (.getInputStream 0)
-                          (CipherInputStream. rc4)
-                          ->source)}
-               (let [upstream-url (str (uri/join @upstream-atom "data" chapter image))
-                     cache-stream (-> cache
-                                      (.edit cache-key)
-                                      (.newOutputStream 0)
-                                      (CipherOutputStream. rc4))
-                     out-stream (stream)]
-                 (chain (http/get upstream-url)
-                        (fn [{:keys [body]}]
-                          (connect-via body (fn [chk] (.write cache-stream chk)) out-stream)
-                          {:body out-stream}
-                          )))
+                 cache-key-str (lower-case (DatatypeConverter/printHexBinary cache-key))
+                 rc4 (get-cipher "RC4" cache-key)]
+             (if-let [entry (.get cache cache-key-str)]
+               {:body (-> entry (.getInputStream 0) (CipherInputStream. rc4))
+                :headers (-> entry (.getString 1) decode64 nippy/thaw)}
+               (do (log/info (str "Cache miss, fetching from " @upstream-atom))
+                   (d/chain (http/get (str (uri/join @upstream-atom (str "/data/" chapter "/" image))))
+                          (fn [{:keys [body headers]}]
+                            (if-let [content-length (-> headers
+                                                        (get "content-length")
+                                                        edn/read-string)]
+                              (let [cache-entry (-> cache (.edit cache-key-str))
+                                    stored-headers (select-keys headers ["content-length"
+                                                                         "content-type"
+                                                                         "etag"])
+                                    counter (atom 0)
+                                    cache-stream (-> cache-entry
+                                                     (.newOutputStream 0)
+                                                     (CipherOutputStream. rc4))
+                                    in-stream (convert body (stream-of bytes) {:chunk-size 4096})
+                                    out-stream (buffered-stream alength content-length)]
+                                (consume
+                                  (fn [arr]
+                                    (swap! counter + (alength arr))
+                                    (.write cache-stream arr)
+                                    (when (not (closed? out-stream))
+                                      (put! out-stream arr)))
+                                  in-stream)
+                                (on-drained
+                                  in-stream
+                                  (fn []
+                                    (.close cache-stream)
+                                    (if (= content-length @counter)
+                                      (do (->> stored-headers nippy/freeze encode64 (.set cache-entry 1))
+                                          (.commit cache-entry)
+                                          (log/info (str "Cache commit: " chapter "/" image)))
+                                      (do (.abort cache-entry)
+                                          (log/warn (str "Cache abort: " chapter "/" image))))))
+                                {:body out-stream
+                                 :headers stored-headers})
+                              ;; Passthrough request if no content-length
+                              {:body body
+                               :headers headers})
+                            )))
                ))))
 
     (add-watch
@@ -115,7 +151,8 @@
                             :ssl-context ssl-ctx
                             :pipeline-transform 
                             (fn [pipeline]
-                              (.addLast pipeline bandwidth-limiter egress-limiter))
+                              (.addLast pipeline bandwidth-limiter)
+                              (.addLast pipeline egress-limiter))
                             })]
               (log/info "Server started")
               (reset! server-atom server)))
@@ -133,7 +170,7 @@
                      :requested_shard_count (:shard-count config)
                      }]
             (log/info (str "POST " url))
-            @(chain (http/post (-> config :api-server (uri/join "/ping") str)
+            @(d/chain (http/post (-> config :api-server (uri/join "/ping") str)
                                {:content-type :json
                                 :form-params req
                                 :as :json
@@ -165,6 +202,7 @@
           (reset! server-atom nil)
           (netty/close server)
           (netty/wait-for-close server))
+        (.close cache)
         (.shutdown executor)
         ))
     ))
