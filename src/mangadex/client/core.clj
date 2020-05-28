@@ -1,6 +1,7 @@
 (ns mangadex.client.core
   (:gen-class)
   (:require [clojure.pprint :refer [pprint]]
+            [clojure.string :refer [join]]
             [clojure.java.io :as io]
             [clojure.edn :as edn]
             [manifold.time :refer [every minutes]]
@@ -16,7 +17,8 @@
             [shutdown.core :as shutdown]
             [taoensso.timbre :as log]
             )
-  (:import [java.util.concurrent ScheduledThreadPoolExecutor]
+  (:import [java.util Base64]
+           [java.util.concurrent ScheduledThreadPoolExecutor]
            [javax.crypto Cipher CipherInputStream CipherOutputStream]
            [io.netty.handler.ssl SslContextBuilder]
            [io.netty.handler.traffic GlobalTrafficShapingHandler]
@@ -32,6 +34,20 @@
 
 (def server-atom (atom nil)) ;; AlephServer
 (def upstream-atom (atom nil)) ;; Upstream URL
+
+
+(defn encode64 [b]
+  (.encodeToString (Base64/getEncoder) b))
+
+
+(defn format-pem-string [encoded]
+  (let [chunked (->> encoded
+                     (partition 64 64 [])
+                     (map #(apply str %)))
+        formatted (join "\n" chunked)]
+    (str "-----BEGIN PRIVATE KEY-----\n"
+         formatted
+         "\n-----END PRIVATE KEY-----\n")))
 
 (defn -main []
   ;; Global exception handler
@@ -87,12 +103,11 @@
               (reset! server-atom nil)
               (netty/close server)
               (netty/wait-for-close server))
-            (println (-> tls :key .getBytes (pem/read-privkey "")
-                                    .getEncoded (String. "UTF-8")))
             (let [ssl-ctx (-> (SslContextBuilder/forServer
-                                (-> tls :key .getBytes (pem/read-privkey ""))
                                 (-> tls :cert .getBytes io/input-stream)
-                                )
+                                (-> tls :key .getBytes (pem/read-privkey "")
+                                    .getEncoded encode64 format-pem-string
+                                    .getBytes io/input-stream))
                               (.build))
                   server (http/start-server
                            http-handler
@@ -111,33 +126,33 @@
       (minutes 1)
       (fn []
         (try
-        (let [url (-> config :api-server (uri/join "/ping") str)
-              req {:secret (:secret config)
-                   :port (:https-port config)
-                   :tls_created_at (if-let [tls @tls-atom] (:time tls) "1970-01-01T00:00:00Z")
-                   :requested_shard_count (:shard-count config)
-                   }]
-          (log/info (str "POST " url))
-          @(chain (http/post (-> config :api-server (uri/join "/ping") str)
-                             {:content-type :json
-                              :form-params req
-                              :as :json
-                              })
-                  (fn [{{:keys [image_server tls]} :body}]
-                    (log/info "Ping success")
-                    (when image_server
-                      (log/info (str "  > got image_server " image_server))
-                      (reset! upstream-atom image_server))
-                    (when tls
-                      (log/info (str "  > got tls - created: " (:created_at tls)))
-                      (reset! tls-atom {:cert (:certificate tls)
-                                        :key (:private_key tls)
-                                        :time (:created_at tls)
-                                        })))
-                  ))
-        (catch Exception ex
+          (let [url (-> config :api-server (uri/join "/ping") str)
+                req {:secret (:secret config)
+                     :port (:https-port config)
+                     :tls_created_at (if-let [tls @tls-atom] (:time tls) "1970-01-01T00:00:00Z")
+                     :requested_shard_count (:shard-count config)
+                     }]
+            (log/info (str "POST " url))
+            @(chain (http/post (-> config :api-server (uri/join "/ping") str)
+                               {:content-type :json
+                                :form-params req
+                                :as :json
+                                })
+                    (fn [{{:keys [image_server tls]} :body}]
+                      (log/info "Ping success")
+                      (when image_server
+                        (log/info (str "  > got image_server " image_server))
+                        (reset! upstream-atom image_server))
+                      (when tls
+                        (log/info (str "  > got tls - created: " (:created_at tls)))
+                        (reset! tls-atom {:cert (:certificate tls)
+                                          :key (:private_key tls)
+                                          :time (:created_at tls)
+                                          })))
+                    ))
+          (catch Exception ex
             (log/error ex))
-        )))
+          )))
 
     (shutdown/add-hook!
       :shutdown
