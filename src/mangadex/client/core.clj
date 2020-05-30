@@ -94,36 +94,39 @@
                             (if-let [content-length (-> headers
                                                         (get "content-length")
                                                         edn/read-string)]
-                              (let [cache-entry (-> cache (.edit cache-key-str))
-                                    stored-headers (select-keys headers ["content-length"
-                                                                         "content-type"
-                                                                         "etag"])
-                                    counter (atom 0)
-                                    cache-stream (-> cache-entry
-                                                     (.newOutputStream 0)
-                                                     (CipherOutputStream. rc4))
-                                    in-stream (convert body (stream-of bytes) {:chunk-size 4096})
-                                    out-stream (buffered-stream alength content-length)]
-                                (consume
-                                  (fn [arr]
-                                    (swap! counter + (alength arr))
-                                    (.write cache-stream arr)
-                                    (when (not (closed? out-stream))
-                                      (put! out-stream arr)))
-                                  in-stream)
-                                (on-drained
-                                  in-stream
-                                  (fn []
-                                    (.close cache-stream)
-                                    (if (= content-length @counter)
-                                      (do (->> stored-headers nippy/freeze encode64 (.set cache-entry 1))
-                                          (.commit cache-entry)
-                                          (log/info (str "Cache commit: " chapter "/" image)))
-                                      (do (.abort cache-entry)
-                                          (log/warn (str "Cache abort: " chapter "/" image))))))
-                                {:body out-stream
-                                 :headers stored-headers})
-                              ;; Passthrough request if no content-length
+                              (if-let [cache-entry (-> cache (.edit cache-key-str))]
+                                (let [stored-headers (select-keys headers ["content-length"
+                                                                           "content-type"
+                                                                           "etag"])
+                                      counter (atom 0)
+                                      cache-stream (-> cache-entry
+                                                       (.newOutputStream 0)
+                                                       (CipherOutputStream. rc4))
+                                      in-stream (convert body (stream-of bytes) {:chunk-size 4096})
+                                      out-stream (buffered-stream alength content-length)
+                                      ]
+                                  (consume
+                                    (fn [arr]
+                                      (swap! counter + (alength arr))
+                                      (.write cache-stream arr)
+                                      (when (not (closed? out-stream))
+                                        (put! out-stream arr)))
+                                    in-stream)
+                                  (on-drained
+                                    in-stream
+                                    (fn []
+                                      (.close cache-stream)
+                                      (if (= content-length @counter)
+                                        (do (->> stored-headers nippy/freeze encode64 (.set cache-entry 1))
+                                            (.commit cache-entry)
+                                            (log/info (str "Cache commit: " chapter "/" image)))
+                                        (do (.abort cache-entry)
+                                            (log/warn (str "Cache abort: " chapter "/" image))))))
+                                  {:body out-stream
+                                   :headers stored-headers})
+                                ;; Request coalescing not supported
+                                {:status 500})
+                              ;; Pass-through request if no content-length
                               {:body body
                                :headers headers})
                             )))
@@ -200,7 +203,7 @@
                      :form-params {:secret (:secret config)}})
         (when-let [server @server-atom]
           (reset! server-atom nil)
-          (netty/close server)
+          (.close server)
           (netty/wait-for-close server))
         (.close cache)
         (.shutdown executor)
