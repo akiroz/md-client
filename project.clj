@@ -10,6 +10,7 @@
                  [com.jakewharton/disklrucache "2.0.2"]
                  [com.taoensso/timbre "4.10.0"]
                  [com.taoensso/nippy "2.14.0"]
+                 [fullspectrum/influxdb-client "1.0.0"]
                  ]
   :profiles {:uberjar {:aot :all}}
   :main mangadex.client.core

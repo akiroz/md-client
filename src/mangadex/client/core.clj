@@ -18,17 +18,22 @@
             [shutdown.core :as shutdown]
             [taoensso.timbre :as log]
             [taoensso.nippy :as nippy]
+            [influxdb.client :as influx]
+            [influxdb.convert :refer [point->line]]
             )
   (:import [java.util Base64]
-           [java.util.concurrent ScheduledThreadPoolExecutor]
            [javax.xml.bind DatatypeConverter]
            [javax.crypto Cipher CipherInputStream CipherOutputStream]
            [javax.crypto.spec SecretKeySpec]
            [io.netty.handler.ssl SslContextBuilder]
            [io.netty.handler.traffic GlobalTrafficShapingHandler]
+           [io.netty.util.concurrent GlobalEventExecutor]
            [com.jakewharton.disklrucache DiskLruCache]
            )
   )
+
+(def influx-conn
+  {:url "http://localhost:8086"})
 
 (def tls-atom (atom nil))
 (comment {:cert ""
@@ -70,11 +75,10 @@
   (let [config (edn/read-string (slurp "config.edn"))
         _ (pprint config) ;; Print config for debugging
         _ (println "================================================================")
-        executor (ScheduledThreadPoolExecutor. 1)
         burst-limit (-> config :burst-rate (* 1024))
         egress-limit (-> config :egress-rate (* 17476))
-        bandwidth-limiter (GlobalTrafficShapingHandler. executor burst-limit 0 1000 10000)
-        egress-limiter (GlobalTrafficShapingHandler. executor egress-limit 0 60000 1)
+        bandwidth-limiter (GlobalTrafficShapingHandler. GlobalEventExecutor/INSTANCE burst-limit 0)
+        egress-limiter (GlobalTrafficShapingHandler. GlobalEventExecutor/INSTANCE egress-limit 0 60000 1)
         cache-size (-> config :cache-size (* 1024 1024))
         cache (DiskLruCache/open (io/file "data") 0 2 cache-size)
         ]
@@ -140,7 +144,7 @@
           (when tls
             (when-let [server @server-atom]
               (reset! server-atom nil)
-              (netty/close server)
+              (.close server)
               (netty/wait-for-close server))
             (let [ssl-ctx (-> (SslContextBuilder/forServer
                                 (-> tls :cert .getBytes io/input-stream)
@@ -154,8 +158,8 @@
                             :ssl-context ssl-ctx
                             :pipeline-transform 
                             (fn [pipeline]
-                              (.addLast pipeline bandwidth-limiter)
-                              (.addLast pipeline egress-limiter))
+                              (.addFirst pipeline bandwidth-limiter)
+                              #_(.addLast pipeline egress-limiter))
                             })]
               (log/info "Server started")
               (reset! server-atom server)))
@@ -163,8 +167,17 @@
             (log/error ex)))))
 
     (every
+      500
+      (fn [] ;; Collect stats
+        (let [counter (.trafficCounter bandwidth-limiter )
+              total (.cumulativeWrittenBytes counter)
+              speed (.lastWriteThroughput counter)
+              line (point->line {:meas "mangadex" :fields {:total total :speed speed}})]
+          (influx/write influx-conn "_internal" line))))
+
+    (every
       (minutes 1)
-      (fn []
+      (fn [] ;; Ping
         (try
           (let [url (-> config :api-server (uri/join "/ping") str)
                 req {:secret (:secret config)
@@ -206,7 +219,6 @@
           (.close server)
           (netty/wait-for-close server))
         (.close cache)
-        (.shutdown executor)
         ))
     ))
 
