@@ -22,6 +22,7 @@
             [influxdb.convert :refer [point->line]]
             )
   (:import [java.util Base64]
+           [java.util.concurrent Executors]
            [javax.xml.bind DatatypeConverter]
            [javax.crypto Cipher CipherInputStream CipherOutputStream]
            [javax.crypto.spec SecretKeySpec]
@@ -76,9 +77,10 @@
         _ (pprint config) ;; Print config for debugging
         _ (println "================================================================")
         burst-limit (-> config :burst-rate (* 1024))
-        egress-limit (-> config :egress-rate (* 17476))
-        bandwidth-limiter (GlobalTrafficShapingHandler. GlobalEventExecutor/INSTANCE burst-limit 0)
-        egress-limiter (GlobalTrafficShapingHandler. GlobalEventExecutor/INSTANCE egress-limit 0 60000 1)
+        egress-limit (-> config :egress-rate (* 1024 1024) (/ 60 60) Math/floor)
+        executor (Executors/newScheduledThreadPool 2)
+        bandwidth-limiter (GlobalTrafficShapingHandler. executor burst-limit 0 1000 1500)
+        egress-limiter (GlobalTrafficShapingHandler. executor egress-limit 0 10000 15000)
         cache-size (-> config :cache-size (* 1024 1024))
         cache (DiskLruCache/open (io/file "data") 0 2 cache-size)
         ]
@@ -159,7 +161,7 @@
                             :pipeline-transform 
                             (fn [pipeline]
                               (.addFirst pipeline bandwidth-limiter)
-                              #_(.addLast pipeline egress-limiter))
+                              (.addFirst pipeline egress-limiter))
                             })]
               (log/info "Server started")
               (reset! server-atom server)))
@@ -219,6 +221,7 @@
           (.close server)
           (netty/wait-for-close server))
         (.close cache)
+        (.shutdownNow executor)
         ))
     ))
 

@@ -1,9 +1,9 @@
-{:api-server    "http://localhost:3001"
- :secret        "test-secret"
- :https-port    3000
- :shard-count   10      ;; No. Shards to Cache
- :cache-size    10000   ;; Disk Cache - MB
- :burst-rate    1200    ;; Bandwidth Limit - KB/s (0 = No Limit)
- :egress-rate   0       ;; Data Limit - MB/Hr (0 = No Limit)
+{:api-server    "https://localhost:3000"
+ :secret        "test"
+ :https-port    443
+ :shard-count   10    ;; No. Shards to Cache
+ :cache-size    1000  ;; Disk Cache - MB
+ :burst-rate    4000  ;; Bandwidth Limit - KB/s (0 = No Limit)
+ :egress-rate   1000  ;; Data Limit - MB/Hr (0 = No Limit)
  }
 
