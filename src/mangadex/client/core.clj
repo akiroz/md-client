@@ -28,6 +28,7 @@
            [javax.crypto.spec SecretKeySpec]
            [io.netty.handler.ssl SslContextBuilder]
            [io.netty.handler.traffic GlobalTrafficShapingHandler]
+           [io.netty.channel ChannelInboundHandlerAdapter]
            [io.netty.util.concurrent GlobalEventExecutor]
            [com.jakewharton.disklrucache DiskLruCache]
            )
@@ -45,6 +46,7 @@
 (def server-atom (atom nil)) ;; AlephServer
 (def upstream-atom (atom nil)) ;; Upstream URL
 (def shutdown-state (atom false))
+(def connection-count (atom 0))
 
 
 (defn encode64 [b]
@@ -168,7 +170,15 @@
                             :shutdown-executor? false
                             :pipeline-transform 
                             (fn [pipeline]
-                              (.addFirst pipeline bandwidth-limiter))
+                              (.addFirst pipeline bandwidth-limiter)
+                              (.addFirst pipeline ;; Connection counter
+                                         (proxy [ChannelInboundHandlerAdapter] []
+                                           (channelActive [ctx]
+                                             (swap! connection-count inc)
+                                             (.fireChannelActive ctx))
+                                           (channelInactive [ctx]
+                                             (swap! connection-count dec)
+                                             (.fireChannelInactive ctx)))))
                             })]
               (log/info "Started Mangadex@Home node")
               (reset! server-atom server)))
@@ -182,7 +192,9 @@
               throughput (.lastWriteThroughput traffic-counter)
               line (point->line {:meas "mangadex"
                                  :fields {:egress byte-count
-                                          :throughput throughput}})]
+                                          :throughput throughput
+                                          :connection @connection-count
+                                          }})]
           (when (and (not @shutdown-state)
                      (not= egress-limit 0)
                      (> byte-count egress-limit))
