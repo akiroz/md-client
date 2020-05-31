@@ -5,7 +5,7 @@
             [clojure.java.io :as io]
             [clojure.edn :as edn]
             [byte-streams :refer [convert stream-of]]
-            [manifold.time :refer [every minutes]]
+            [manifold.time :refer [every seconds minutes hours]]
             [manifold.deferred :as d]
             [manifold.stream :refer [buffered-stream consume put! on-drained closed?]]
             [aleph.http :as http]
@@ -44,6 +44,7 @@
 
 (def server-atom (atom nil)) ;; AlephServer
 (def upstream-atom (atom nil)) ;; Upstream URL
+(def shutdown-state (atom false))
 
 
 (defn encode64 [b]
@@ -77,10 +78,10 @@
         _ (pprint config) ;; Print config for debugging
         _ (println "================================================================")
         burst-limit (-> config :burst-rate (* 1024))
-        egress-limit (-> config :egress-rate (* 1024 1024) (/ 60 60) Math/floor)
-        executor (Executors/newScheduledThreadPool 2)
-        bandwidth-limiter (GlobalTrafficShapingHandler. executor burst-limit 0 1000 1500)
-        egress-limiter (GlobalTrafficShapingHandler. executor egress-limit 0 10000 15000)
+        egress-limit (-> config :egress-rate (* 1024 1024))
+        executor (Executors/newScheduledThreadPool 1)
+        bandwidth-limiter (GlobalTrafficShapingHandler. executor burst-limit 0)
+        traffic-counter (.trafficCounter bandwidth-limiter)
         cache-size (-> config :cache-size (* 1024 1024))
         cache (DiskLruCache/open (io/file "data") 0 2 cache-size)
         ]
@@ -96,58 +97,64 @@
                 :headers (-> entry (.getString 1) decode64 nippy/thaw)}
                (do (log/info (str "Cache miss, fetching from " @upstream-atom))
                    (d/chain (http/get (str (uri/join @upstream-atom (str "/data/" chapter "/" image))))
-                          (fn [{:keys [body headers]}]
-                            (if-let [content-length (-> headers
-                                                        (get "content-length")
-                                                        edn/read-string)]
-                              (if-let [cache-entry (-> cache (.edit cache-key-str))]
-                                (let [stored-headers (select-keys headers ["content-length"
-                                                                           "content-type"
-                                                                           "etag"])
-                                      counter (atom 0)
-                                      cache-stream (-> cache-entry
-                                                       (.newOutputStream 0)
-                                                       (CipherOutputStream. rc4))
-                                      in-stream (convert body (stream-of bytes) {:chunk-size 4096})
-                                      out-stream (buffered-stream alength content-length)
-                                      ]
-                                  (consume
-                                    (fn [arr]
-                                      (swap! counter + (alength arr))
-                                      (.write cache-stream arr)
-                                      (when (not (closed? out-stream))
-                                        (put! out-stream arr)))
-                                    in-stream)
-                                  (on-drained
-                                    in-stream
-                                    (fn []
-                                      (.close cache-stream)
-                                      (if (= content-length @counter)
-                                        (do (->> stored-headers nippy/freeze encode64 (.set cache-entry 1))
-                                            (.commit cache-entry)
-                                            (log/info (str "Cache commit: " chapter "/" image)))
-                                        (do (.abort cache-entry)
-                                            (log/warn (str "Cache abort: " chapter "/" image))))))
-                                  {:body out-stream
-                                   :headers stored-headers})
-                                ;; Request coalescing not supported
-                                {:status 500})
-                              ;; Pass-through request if no content-length
-                              {:body body
-                               :headers headers})
+                            (fn [{:keys [body headers status]}]
+                              (let [content-length (-> headers
+                                                       (get "content-length")
+                                                       edn/read-string)
+                                    cache-entry (-> cache (.edit cache-key-str))]
+                                (cond
+                                  (not= status 200)     {:body body :headers headers}
+                                  (not content-length)  {:body body :headers headers}
+                                  (not cache-entry)     {:status 500}
+                                  :else
+                                  (let [stored-headers (select-keys headers ["content-length"
+                                                                             "content-type"
+                                                                             "etag"])
+                                        counter (atom 0)
+                                        cache-stream (-> cache-entry
+                                                         (.newOutputStream 0)
+                                                         (CipherOutputStream. rc4))
+                                        in-stream (convert body (stream-of bytes) {:chunk-size 4096})
+                                        out-stream (buffered-stream alength content-length)
+                                        ]
+                                    (consume
+                                      (fn [arr]
+                                        (swap! counter + (alength arr))
+                                        (.write cache-stream arr)
+                                        (when (not (closed? out-stream))
+                                          (put! out-stream arr)))
+                                      in-stream)
+                                    (on-drained
+                                      in-stream
+                                      (fn []
+                                        (.close cache-stream)
+                                        (if (= content-length @counter)
+                                          (do (->> stored-headers nippy/freeze encode64 (.set cache-entry 1))
+                                              (.commit cache-entry)
+                                              (log/info (str "Cache commit: " chapter "/" image)))
+                                          (do (.abort cache-entry)
+                                              (log/warn (str "Cache abort: " chapter "/" image))))))
+                                    {:body out-stream
+                                     :headers stored-headers})))
                             )))
                ))))
+
+    (defn shutdown-node []
+      (when-let [server @server-atom]
+        @(http/post (-> config :api-server (uri/join "/stop") str)
+                    {:content-type :json 
+                     :form-params {:secret (:secret config)}})
+        (reset! server-atom nil)
+        (.close server)
+        (netty/wait-for-close server)
+        (log/info "Stopped Mangadex@Home node")))
 
     (add-watch
       tls-atom :tls-update
       (fn [_ _ _ tls]
         (try
-          (log/info "(Re)Starting server...")
           (when tls
-            (when-let [server @server-atom]
-              (reset! server-atom nil)
-              (.close server)
-              (netty/wait-for-close server))
+            (shutdown-node)
             (let [ssl-ctx (-> (SslContextBuilder/forServer
                                 (-> tls :cert .getBytes io/input-stream)
                                 (-> tls :key .getBytes (pem/read-privkey "")
@@ -158,70 +165,79 @@
                            http-handler
                            {:port (:https-port config)
                             :ssl-context ssl-ctx
+                            :shutdown-executor? false
                             :pipeline-transform 
                             (fn [pipeline]
-                              (.addFirst pipeline bandwidth-limiter)
-                              (.addFirst pipeline egress-limiter))
+                              (.addFirst pipeline bandwidth-limiter))
                             })]
-              (log/info "Server started")
+              (log/info "Started Mangadex@Home node")
               (reset! server-atom server)))
           (catch Exception ex
             (log/error ex)))))
 
     (every
-      500
+      (seconds 1)
       (fn [] ;; Collect stats
-        (let [counter (.trafficCounter bandwidth-limiter )
-              total (.cumulativeWrittenBytes counter)
-              speed (.lastWriteThroughput counter)
-              line (point->line {:meas "mangadex" :fields {:total total :speed speed}})]
+        (let [byte-count (.cumulativeWrittenBytes traffic-counter)
+              throughput (.lastWriteThroughput traffic-counter)
+              line (point->line {:meas "mangadex"
+                                 :fields {:egress byte-count
+                                          :throughput throughput}})]
+          (when (and (not @shutdown-state)
+                     (not= egress-limit 0)
+                     (> byte-count egress-limit))
+            (log/info "Hourly limit exceeded - taking node offline...")
+            (reset! shutdown-state true)
+            (.resetCumulativeTime traffic-counter)
+            (future (shutdown-node)))
           (influx/write influx-conn "_internal" line))))
 
     (every
+      (hours 1)
+      (fn [] 
+        (when @shutdown-state
+          (reset! tls-atom nil)
+          (reset! shutdown-state false))))
+    
+    (every
       (minutes 1)
-      (fn [] ;; Ping
-        (try
-          (let [url (-> config :api-server (uri/join "/ping") str)
-                req {:secret (:secret config)
-                     :port (:https-port config)
-                     :tls_created_at (if-let [tls @tls-atom] (:time tls) "1970-01-01T00:00:00Z")
-                     :requested_shard_count (:shard-count config)
-                     }]
-            (log/info (str "POST " url))
-            @(d/chain (http/post (-> config :api-server (uri/join "/ping") str)
-                               {:content-type :json
-                                :form-params req
-                                :as :json
-                                })
-                    (fn [{{:keys [image_server tls]} :body}]
-                      (log/info "Ping success")
-                      (when image_server
-                        (log/info (str "  > got image_server " image_server))
-                        (reset! upstream-atom image_server))
-                      (when tls
-                        (log/info (str "  > got tls - created: " (:created_at tls)))
-                        (reset! tls-atom {:cert (:certificate tls)
-                                          :key (:private_key tls)
-                                          :time (:created_at tls)
-                                          })))
-                    ))
-          (catch Exception ex
-            (log/error ex))
-          )))
+      (fn []
+        (when-not @shutdown-state
+          (try
+            (let [url (-> config :api-server (uri/join "/ping") str)
+                  req {:secret (:secret config)
+                       :port (:https-port config)
+                       :tls_created_at (if-let [tls @tls-atom] (:time tls) "1970-01-01T00:00:00Z")
+                       :requested_shard_count (:shard-count config)
+                       }]
+              (log/info (str "POST " url))
+              @(d/chain (http/post (-> config :api-server (uri/join "/ping") str)
+                                   {:content-type :json
+                                    :form-params req
+                                    :as :json
+                                    })
+                        (fn [{{:keys [image_server tls]} :body}]
+                          (log/info "Ping success")
+                          (when image_server
+                            (log/info (str "> Got image_server " image_server))
+                            (reset! upstream-atom image_server))
+                          (when tls
+                            (log/info (str "> Got tls - created: " (:created_at tls)))
+                            (reset! tls-atom {:cert (:certificate tls)
+                                              :key (:private_key tls)
+                                              :time (:created_at tls)
+                                              })))
+                        ))
+            (catch Exception ex
+              (log/error ex))))))
 
     (shutdown/add-hook!
       :shutdown
       (fn []
-        (log/info "Shutting down Mangadex@Home client...")
-        @(http/post (-> config :api-server (uri/join "/stop") str)
-                    {:content-type :json 
-                     :form-params {:secret (:secret config)}})
-        (when-let [server @server-atom]
-          (reset! server-atom nil)
-          (.close server)
-          (netty/wait-for-close server))
+        (log/info "Shutting down...")
+        (shutdown-node)
         (.close cache)
         (.shutdownNow executor)
         ))
-    ))
+))
 
