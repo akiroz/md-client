@@ -77,7 +77,7 @@
 
   (println "=== Starting Mangadex@Home Client ==============================")
   (let [config (edn/read-string (slurp "config.edn"))
-        _ (pprint config) ;; Print config for debugging
+        _ (pprint (dissoc config :secret) ;; Print config for debugging
         _ (println "================================================================")
         burst-limit (-> config :burst-rate (* 1024))
         egress-limit (-> config :egress-rate (* 1024 1024))
