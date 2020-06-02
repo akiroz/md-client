@@ -17,6 +17,7 @@
             [buddy.core.hash :refer [md5]]
             [shutdown.core :as shutdown]
             [taoensso.timbre :as log]
+            [taoensso.timbre.appenders.3rd-party.rotor :refer [rotor-appender]]
             [taoensso.nippy :as nippy]
             [influxdb.client :as influx]
             [influxdb.convert :refer [point->line]]
@@ -34,9 +35,6 @@
            )
   )
 
-(def influx-conn
-  {:url "http://localhost:8086"})
-
 (def tls-atom (atom nil))
 (comment {:cert ""
           :key  ""
@@ -46,8 +44,10 @@
 (def server-atom (atom nil)) ;; AlephServer
 (def upstream-atom (atom nil)) ;; Upstream URL
 (def shutdown-state (atom false))
-(def connection-count (atom 0))
 
+(def connection-count (atom 0))
+(def request-count (atom 0))
+(def hit-count (atom 0))
 
 (defn encode64 [b]
   (.encodeToString (Base64/getEncoder) b))
@@ -69,34 +69,41 @@
          "\n-----END PRIVATE KEY-----\n")))
 
 (defn -main []
+
   ;; Global exception handler
   (Thread/setDefaultUncaughtExceptionHandler
     (reify Thread$UncaughtExceptionHandler
       (uncaughtException [_ thread ex]
         (log/error ex "Uncaught exception on" (.getName thread)))))
 
-  (println "=== Starting Mangadex@Home Client ==============================")
+  (println "=== Mangadex@Home Client =======================================")
   (let [config (edn/read-string (slurp "config.edn"))
-        _ (pprint (dissoc config :secret) ;; Print config for debugging
-        _ (println "================================================================")
-        burst-limit (-> config :burst-rate (* 1024))
-        egress-limit (-> config :egress-rate (* 1024 1024))
+        burst-limit (-> config :burst-limit (* 1024))
+        egress-limit (-> config :egress-limit (* 1024 1024))
         executor (Executors/newScheduledThreadPool 1)
         bandwidth-limiter (GlobalTrafficShapingHandler. executor burst-limit 0)
         traffic-counter (.trafficCounter bandwidth-limiter)
         cache-size (-> config :cache-size (* 1024 1024))
         cache (DiskLruCache/open (io/file "data") 0 2 cache-size)
         ]
+    (pprint (dissoc config :secret)) ;; Print config for debugging
+    (println "================================================================")
+
+    (when (:file-logging config)
+      (log/merge-config! {:appenders {:file (rotor-appender {:path "log/md-client.log"})}}))
 
     (defroutes http-handler
       (GET "/data/:chapter/:image" [chapter image :as req]
            (log/info (str "GET " (:uri req)))
+           (swap! request-count inc)
            (let [cache-key (md5 (str chapter image))
                  cache-key-str (lower-case (DatatypeConverter/printHexBinary cache-key))
                  rc4 (get-cipher "RC4" cache-key)]
              (if-let [entry (.get cache cache-key-str)]
-               {:body (-> entry (.getInputStream 0) (CipherInputStream. rc4))
-                :headers (-> entry (.getString 1) decode64 nippy/thaw)}
+               (do (swap! hit-count inc)
+                   {:body (-> entry (.getInputStream 0) (CipherInputStream. rc4))
+                    :headers (-> entry (.getString 1) decode64 nippy/thaw)
+                    })
                (do (log/info (str "Cache miss, fetching from " @upstream-atom))
                    (d/chain (http/get (str (uri/join @upstream-atom (str "/data/" chapter "/" image))))
                             (fn [{:keys [body headers status]}]
@@ -138,7 +145,7 @@
                                               (log/warn (str "Cache abort: " chapter "/" image))))))
                                     {:body out-stream
                                      :headers stored-headers})))
-                            )))
+                              )))
                ))))
 
     (defn shutdown-node []
@@ -185,24 +192,27 @@
           (catch Exception ex
             (log/error ex)))))
 
-    (every
-      (seconds 1)
-      (fn [] ;; Collect stats
-        (let [byte-count (.cumulativeWrittenBytes traffic-counter)
-              throughput (.lastWriteThroughput traffic-counter)
-              line (point->line {:meas "mangadex"
-                                 :fields {:egress byte-count
-                                          :throughput throughput
-                                          :connection @connection-count
-                                          }})]
-          (when (and (not @shutdown-state)
-                     (not= egress-limit 0)
-                     (> byte-count egress-limit))
-            (log/info "Hourly limit exceeded - taking node offline...")
-            (reset! shutdown-state true)
-            (.resetCumulativeTime traffic-counter)
-            (future (shutdown-node)))
-          (influx/write influx-conn "_internal" line))))
+    (when-let [influx-url (:influx-metrics config)]
+      (every
+        (seconds 1)
+        (fn [] ;; Collect stats
+          (let [byte-count (.cumulativeWrittenBytes traffic-counter)
+                throughput (.lastWriteThroughput traffic-counter)
+                line (point->line {:meas "mangadex"
+                                   :fields {:egress byte-count
+                                            :throughput throughput
+                                            :connection @connection-count
+                                            :request @request-count
+                                            :hit @hit-count
+                                            }})]
+            (when (and (not @shutdown-state)
+                       (not= egress-limit 0)
+                       (> byte-count egress-limit))
+              (log/info "Hourly limit exceeded - taking node offline...")
+              (reset! shutdown-state true)
+              (.resetCumulativeTime traffic-counter)
+              (future (shutdown-node)))
+            (influx/write {:url influx-url} "_internal" line)))))
 
     (every
       (hours 1)
@@ -251,5 +261,5 @@
         (.close cache)
         (.shutdownNow executor)
         ))
-))
+  ))
 
