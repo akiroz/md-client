@@ -11,6 +11,7 @@
                  [com.taoensso/timbre "4.10.0"]
                  [com.taoensso/nippy "2.14.0"]
                  [fullspectrum/influxdb-client "1.0.0"]
+                 [javax.xml.bind/jaxb-api "2.2.4"]
                  ]
   :profiles {:uberjar {:aot :all}}
   :main mangadex.client.core
