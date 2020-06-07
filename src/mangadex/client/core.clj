@@ -93,10 +93,10 @@
       (log/merge-config! {:appenders {:file (rotor-appender {:path "log/md-client.log"})}}))
 
     (defroutes http-handler
-      (GET "/data/:chapter/:image" [chapter image :as req]
+      (GET "/:req-type/:chapter/:image" [req-type chapter image :as req]
            (log/info (str "GET " (:uri req)))
            (swap! request-count inc)
-           (let [cache-key (md5 (str chapter image))
+           (let [cache-key (md5 (str req-type chapter image))
                  cache-key-str (lower-case (DatatypeConverter/printHexBinary cache-key))
                  rc4 (get-cipher "RC4" cache-key)]
              (if-let [entry (.get cache cache-key-str)]
@@ -108,50 +108,52 @@
                    {:body (-> entry (.getInputStream 0) (CipherInputStream. rc4))
                     :headers (assoc headers "cache-control" "public, max-age=604800, immutable")}))
                ;; Cache Miss ============================================================
-               (do (log/info (str "Cache miss, fetching from " @upstream-atom))
-                   (d/chain (http/get (str (uri/join @upstream-atom (str "/data/" chapter "/" image))))
-                            (fn [{:keys [body headers status]}]
-                              (let [content-length (-> headers
-                                                       (get "content-length")
-                                                       edn/read-string)
-                                    cache-entry (-> cache (.edit cache-key-str))]
-                                (cond
-                                  (not= status 200)     {:body body :headers headers}
-                                  (not content-length)  {:body body :headers headers}
-                                  (not cache-entry)     {:status 500}
-                                  :else
-                                  (let [stored-headers (select-keys headers ["content-length"
-                                                                             "content-type"
-                                                                             "etag"])
-                                        counter (atom 0)
-                                        cache-stream (-> cache-entry
-                                                         (.newOutputStream 0)
-                                                         (CipherOutputStream. rc4))
-                                        in-stream (convert body (stream-of bytes) {:chunk-size 4096})
-                                        out-stream (buffered-stream alength content-length)
-                                        ]
-                                    (consume
-                                      (fn [arr]
-                                        (swap! counter + (alength arr))
-                                        (.write cache-stream arr)
-                                        (when (not (closed? out-stream))
-                                          (put! out-stream arr)))
-                                      in-stream)
-                                    (on-drained
-                                      in-stream
-                                      (fn []
-                                        (close! out-stream)
-                                        (.close cache-stream)
-                                        (if (= content-length @counter)
-                                          (do (->> stored-headers nippy/freeze encode64 (.set cache-entry 1))
-                                              (.commit cache-entry)
-                                              (log/info (str "Cache commit: " chapter "/" image)))
-                                          (do (.abort cache-entry)
-                                              (log/warn (str "Cache abort: " chapter "/" image))))))
-                                    {:body out-stream
-                                     :headers (assoc stored-headers "cache-control"
-                                                     "public, max-age=604800, immutable")})))
-                              )))
+               (if (not (contains? #{"data" "data-saver"} req-type))
+                 {:status 400}
+                 (do (log/info (str "Cache miss, fetching from " @upstream-atom))
+                     (d/chain (http/get (str (uri/join @upstream-atom (str "/data/" chapter "/" image))))
+                              (fn [{:keys [body headers status]}]
+                                (let [content-length (-> headers
+                                                         (get "content-length")
+                                                         edn/read-string)
+                                      cache-entry (-> cache (.edit cache-key-str))]
+                                  (cond
+                                    (not= status 200)     {:body body :headers headers}
+                                    (not content-length)  {:body body :headers headers}
+                                    (not cache-entry)     {:status 500}
+                                    :else
+                                    (let [stored-headers (select-keys headers ["content-length"
+                                                                               "content-type"
+                                                                               "etag"])
+                                          counter (atom 0)
+                                          cache-stream (-> cache-entry
+                                                           (.newOutputStream 0)
+                                                           (CipherOutputStream. rc4))
+                                          in-stream (convert body (stream-of bytes) {:chunk-size 4096})
+                                          out-stream (buffered-stream alength content-length)
+                                          ]
+                                      (consume
+                                        (fn [arr]
+                                          (swap! counter + (alength arr))
+                                          (.write cache-stream arr)
+                                          (when (not (closed? out-stream))
+                                            (put! out-stream arr)))
+                                        in-stream)
+                                      (on-drained
+                                        in-stream
+                                        (fn []
+                                          (close! out-stream)
+                                          (.close cache-stream)
+                                          (if (= content-length @counter)
+                                            (do (->> stored-headers nippy/freeze encode64 (.set cache-entry 1))
+                                                (.commit cache-entry)
+                                                (log/info (str "Cache commit: " chapter "/" image)))
+                                            (do (.abort cache-entry)
+                                                (log/warn (str "Cache abort: " chapter "/" image))))))
+                                      {:body out-stream
+                                       :headers (assoc stored-headers "cache-control"
+                                                       "public, max-age=604800, immutable")})))
+                                ))))
                ))))
 
     (defn shutdown-node []
