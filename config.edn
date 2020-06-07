@@ -1,5 +1,4 @@
-{:api-server      ""
- :secret          ""
+{:secret          ""
  :https-port      443
  :cache-size      16000     ;; Disk Cache - MB
  :burst-limit     0         ;; Bandwidth Limit - KB/s (0 = No Limit)

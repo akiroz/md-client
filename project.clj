@@ -1,6 +1,7 @@
-(defproject network.mangadex/md-client "1.1.4"
+(defproject network.mangadex/md-client "1.2.0"
   :description "Mangadex@Home Client"
   :dependencies [[org.clojure/clojure "1.10.1"]
+                 [environ "1.2.0"]
                  [aleph "0.4.6"]
                  [buddy/buddy-core "1.6.0"]
                  [compojure "1.6.1"]

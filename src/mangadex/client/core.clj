@@ -4,6 +4,7 @@
             [clojure.string :refer [join lower-case]]
             [clojure.java.io :as io]
             [clojure.edn :as edn]
+            [environ.core :refer [env]]
             [byte-streams :refer [convert stream-of]]
             [manifold.time :refer [every seconds minutes hours]]
             [manifold.deferred :as d]
@@ -68,7 +69,17 @@
          formatted
          "\n-----END PRIVATE KEY-----\n")))
 
-(defn -main []
+(def default-config
+  {:api-server "https://api.mangadex.network"
+   :https-port 443
+   :cache-size 1000
+   :burst-limit 0
+   :egress-limit 0
+   :influx-metrics nil
+   :file-logging false
+   })
+
+(defn -main [config-file]
 
   ;; Global exception handler
   (Thread/setDefaultUncaughtExceptionHandler
@@ -76,14 +87,16 @@
       (uncaughtException [_ thread ex]
         (log/error ex "Uncaught exception on" (.getName thread)))))
 
-  (println "=== Mangadex@Home Client =======================================")
-  (let [config (edn/read-string (slurp "config.edn"))
-        burst-limit (-> config :burst-limit (* 1024))
-        egress-limit (-> config :egress-limit (* 1024 1024))
+  (println (str "=== Mangadex@Home Client =======================================\n"
+                (:java-runtime-name env) " " (:java-runtime-version env) "\n"
+                "Version: " (:md-client-version env) " Config:\n"))
+  (let [config (merge default-config (edn/read-string (slurp config-file)))
+        burst-limit (-> config :burst-limit (* 1000))
+        egress-limit (-> config :egress-limit (* 1000 1000))
         executor (Executors/newScheduledThreadPool 1)
         bandwidth-limiter (GlobalTrafficShapingHandler. executor burst-limit 0)
         traffic-counter (.trafficCounter bandwidth-limiter)
-        cache-size (-> config :cache-size (* 1024 1024))
+        cache-size (-> config :cache-size (* 1000 1000))
         cache (DiskLruCache/open (io/file "data") 0 2 cache-size)
         ]
     (pprint (dissoc config :secret)) ;; Print config for debugging
