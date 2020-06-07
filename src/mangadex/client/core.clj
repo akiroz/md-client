@@ -229,8 +229,8 @@
             (let [url (-> config :api-server (uri/join "/ping") str)
                   req {:secret (:secret config)
                        :port (:https-port config)
+                       :disk_space cache-size
                        :tls_created_at (if-let [tls @tls-atom] (:time tls) "1970-01-01T00:00:00Z")
-                       :requested_shard_count (:shard-count config)
                        }]
               (log/info (str "POST " url))
               @(d/chain (http/post (-> config :api-server (uri/join "/ping") str)
@@ -239,12 +239,11 @@
                                     :as :json
                                     })
                         (fn [{{:keys [image_server tls]} :body}]
-                          (log/info "Ping success")
-                          (when image_server
-                            (log/info (str "> Got image_server " image_server))
+                          (when (and image_server (not= image_server @upstream-atom))
+                            (log/info (str "image_server: " image_server))
                             (reset! upstream-atom image_server))
                           (when tls
-                            (log/info (str "> Got tls - created: " (:created_at tls)))
+                            (log/info (str "TLS Renew (created: " (:created_at tls) ")"))
                             (reset! tls-atom {:cert (:certificate tls)
                                               :key (:private_key tls)
                                               :time (:created_at tls)
