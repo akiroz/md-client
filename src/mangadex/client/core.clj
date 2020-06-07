@@ -7,7 +7,7 @@
             [byte-streams :refer [convert stream-of]]
             [manifold.time :refer [every seconds minutes hours]]
             [manifold.deferred :as d]
-            [manifold.stream :refer [buffered-stream consume put! on-drained closed?]]
+            [manifold.stream :refer [buffered-stream consume put! close! on-drained closed?]]
             [aleph.http :as http]
             [aleph.http.client-middleware :refer [default-middleware]]
             [aleph.netty :as netty]
@@ -136,6 +136,7 @@
                                     (on-drained
                                       in-stream
                                       (fn []
+                                        (close! out-stream)
                                         (.close cache-stream)
                                         (if (= content-length @counter)
                                           (do (->> stored-headers nippy/freeze encode64 (.set cache-entry 1))
