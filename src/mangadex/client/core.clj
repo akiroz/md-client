@@ -213,7 +213,7 @@
               (reset! shutdown-state true)
               (.resetCumulativeTime traffic-counter)
               (future (shutdown-node)))
-            (influx/write {:url influx-url} "_internal" line)))))
+            (influx/write {:url influx-url} "mangadex" line)))))
 
     (every
       (hours 1)
