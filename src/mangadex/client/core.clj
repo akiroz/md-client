@@ -204,6 +204,7 @@
                                             :connection @connection-count
                                             :request @request-count
                                             :hit @hit-count
+                                            :cacheSize (.size cache)
                                             }})]
             (when (and (not @shutdown-state)
                        (not= egress-limit 0)
