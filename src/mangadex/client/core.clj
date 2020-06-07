@@ -69,6 +69,9 @@
          formatted
          "\n-----END PRIVATE KEY-----\n")))
 
+(defmacro get-version []
+  `~(System/getProperty "md-client.version"))
+
 (def default-config
   {:api-server "https://api.mangadex.network"
    :https-port 443
@@ -89,7 +92,7 @@
 
   (println (str "=== Mangadex@Home Client =======================================\n"
                 (:java-runtime-name env) " " (:java-runtime-version env) "\n"
-                "Version: " (:md-client-version env) " Config:\n"))
+                "Version: " (get-version) "\n"))
   (let [config (merge default-config (edn/read-string (slurp config-file)))
         burst-limit (-> config :burst-limit (* 1000))
         egress-limit (-> config :egress-limit (* 1000 1000))
