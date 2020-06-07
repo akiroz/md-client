@@ -100,13 +100,13 @@
                  cache-key-str (lower-case (DatatypeConverter/printHexBinary cache-key))
                  rc4 (get-cipher "RC4" cache-key)]
              (if-let [entry (.get cache cache-key-str)]
-               (let [etag (-> req :headers (get "if-none-match"))
-                     headers (-> entry (.getString 1) decode64 nippy/thaw)]
-                 (swap! hit-count inc)
-                 (if (and etag (= etag (get headers "etag")))
-                   {:status 304}
-                   {:body (-> entry (.getInputStream 0) (CipherInputStream. rc4))
-                    :headers (assoc headers "cache-control" "public, max-age=604800, immutable")}))
+               (do (swap! hit-count inc)
+                   (if (or (-> req :headers (get "if-none-match"))
+                           (-> req :headers (get "if-modified-since")))
+                     {:status 304}
+                     {:body (-> entry (.getInputStream 0) (CipherInputStream. rc4))
+                      :headers (-> (-> entry (.getString 1) decode64 nippy/thaw)
+                                   (assoc "cache-control" "public, max-age=604800, immutable"))}))
                ;; Cache Miss ============================================================
                (if (not (contains? #{"data" "data-saver"} req-type))
                  {:status 400}
@@ -124,6 +124,7 @@
                                     :else
                                     (let [stored-headers (select-keys headers ["content-length"
                                                                                "content-type"
+                                                                               "last-modified"
                                                                                "etag"])
                                           counter (atom 0)
                                           cache-stream (-> cache-entry
