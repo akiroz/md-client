@@ -100,10 +100,14 @@
                  cache-key-str (lower-case (DatatypeConverter/printHexBinary cache-key))
                  rc4 (get-cipher "RC4" cache-key)]
              (if-let [entry (.get cache cache-key-str)]
-               (do (swap! hit-count inc)
+               (let [etag (-> req :headers (get "if-none-match"))
+                     headers (-> entry (.getString 1) decode64 nippy/thaw)]
+                 (swap! hit-count inc)
+                 (if (and etag (= etag (get headers "etag")))
+                   {:status 304}
                    {:body (-> entry (.getInputStream 0) (CipherInputStream. rc4))
-                    :headers (-> entry (.getString 1) decode64 nippy/thaw)
-                    })
+                    :headers (assoc headers "cache-control" "public, max-age=604800, immutable")}))
+               ;; Cache Miss ============================================================
                (do (log/info (str "Cache miss, fetching from " @upstream-atom))
                    (d/chain (http/get (str (uri/join @upstream-atom (str "/data/" chapter "/" image))))
                             (fn [{:keys [body headers status]}]
@@ -145,7 +149,8 @@
                                           (do (.abort cache-entry)
                                               (log/warn (str "Cache abort: " chapter "/" image))))))
                                     {:body out-stream
-                                     :headers stored-headers})))
+                                     :headers (assoc stored-headers "cache-control"
+                                                     "public, max-age=604800, immutable")})))
                               )))
                ))))
 
