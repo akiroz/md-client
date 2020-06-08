@@ -20,6 +20,7 @@ To enable influxdb metrics, enter the HTTP URL in `config.edn`.
 
 The influxdb database is not created automatically, it can be created using the `influx` CLI tool.
 - `influx -execute 'CREATE DATABASE mangadex WITH DURATION 7d'` (Change the retention policy as necessary)
+- `docker exec <Container ID> bash -c "influx ..."` For docker
 
 The client publishes a single measurement (`mangadex`) at 1Hz with the following fields:
 - `cacheSize` Disk space used by the cache in bytes
@@ -29,7 +30,7 @@ The client publishes a single measurement (`mangadex`) at 1Hz with the following
 - `request` Total number of HTTP requests (Since client started)
 - `throughput` Downstream throughput in bytes/second
 
-In Grafana, create a datasource called `InfluxDB` and point it to your influxdb instance with the `mangadex` database and import the `Mangadex@Home-1591605284442.json` Dashboard. Customize as necessary.
+In Grafana, create a datasource called `InfluxDB` (type `influxdb`), and point it to your influxdb instance with the `mangadex` database and import the `Mangadex@Home-1591605284442.json` Dashboard. Customize as necessary.
 
 ### Development
 
