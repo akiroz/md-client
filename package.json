@@ -1,0 +1,8 @@
+{
+  "dependencies": {
+    "axios": "^0.19.2",
+    "influx": "^5.5.1",
+    "lru-diskcache": "^1.1.1",
+    "yaml": "^1.10.0"
+  }
+}

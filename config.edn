@@ -1,9 +1,0 @@
-{:secret          ""
- :https-port      443
- :cache-size      16000     ;; Disk Cache - MB
- :burst-limit     0         ;; Bandwidth Limit - KB/s (0 = No Limit)
- :egress-limit    0         ;; Data Limit - MB/Hr (0 = No Limit)
- :influx-metrics  nil       ;; InfluxDB URL (nil = disable)
- :file-logging    false     ;; Enable file rotating logger
- }
-

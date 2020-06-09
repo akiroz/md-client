@@ -1,0 +1,4 @@
+(require '[environ.core :refer [env]])
+env
+(require '[clojure.pprint :refer [pprint]])
+(pprint env)
