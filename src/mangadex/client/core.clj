@@ -49,6 +49,7 @@
 (def connection-count (atom 0))
 (def request-count (atom 0))
 (def hit-count (atom 0))
+(def egress-prev (atom 0))
 
 (defn encode64 [b]
   (.encodeToString (Base64/getEncoder) b))
@@ -218,13 +219,19 @@
             (log/error ex)))))
 
     (when-let [influx-url (:influx-metrics config)]
+      (let [q "SELECT LAST(request), LAST(hit), LAST(egress) FROM mangadex"
+            resp (influx/unwrap (influx/query {:url influx-url} ::influx/read q {:db "mangadex"}))
+            [{[{[[_ req hit egress]] "values"}] "series"}] resp]
+        (when req (swap! request-count + req))
+        (when hit (swap! hit-count + hit))
+        (when egress (reset! egress-prev egress)))
       (every
         (seconds 1)
         (fn [] ;; Collect stats
           (let [byte-count (.cumulativeWrittenBytes traffic-counter)
                 throughput (.lastWriteThroughput traffic-counter)
                 line (point->line {:meas "mangadex"
-                                   :fields {:egress byte-count
+                                   :fields {:egress (+ @egress-prev byte-count)
                                             :throughput throughput
                                             :connection @connection-count
                                             :request @request-count
