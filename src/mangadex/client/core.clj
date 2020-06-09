@@ -12,6 +12,7 @@
             [aleph.http :as http]
             [aleph.http.client-middleware :refer [default-middleware]]
             [aleph.netty :as netty]
+            [aleph.flow :refer [utilization-executor]]
             [compojure.core :refer [defroutes GET]]
             [lambdaisland.uri :as uri]
             [buddy.core.keys.pem :as pem]
@@ -24,7 +25,7 @@
             [influxdb.convert :refer [point->line]]
             )
   (:import [java.util Base64]
-           [java.util.concurrent Executors]
+           [java.util.concurrent Executors TimeUnit]
            [javax.xml.bind DatatypeConverter]
            [javax.crypto Cipher CipherInputStream CipherOutputStream]
            [javax.crypto.spec SecretKeySpec]
@@ -97,8 +98,9 @@
   (let [config (merge default-config (edn/read-string (slurp config-file)))
         burst-limit (-> config :burst-limit (* 1000))
         egress-limit (-> config :egress-limit (* 1000 1000))
-        executor (Executors/newScheduledThreadPool 1)
-        bandwidth-limiter (GlobalTrafficShapingHandler. executor burst-limit 0)
+        main-executor (utilization-executor 0.9)
+        limit-executor (Executors/newScheduledThreadPool 1)
+        bandwidth-limiter (GlobalTrafficShapingHandler. limit-executor burst-limit 0)
         traffic-counter (.trafficCounter bandwidth-limiter)
         cache-size (-> config :cache-size (* 1000 1000))
         cache (DiskLruCache/open (io/file "data") 0 2 cache-size)
@@ -176,13 +178,13 @@
 
     (defn shutdown-node []
       (when-let [server @server-atom]
-        @(http/post (-> config :api-server (uri/join "/stop") str)
-                    {:content-type :json 
-                     :form-params {:secret (:secret config)}})
-        (reset! server-atom nil)
-        (.close server)
-        (netty/wait-for-close server)
-        (log/info "Stopped Mangadex@Home node")))
+        (let [url (-> config :api-server (uri/join "/stop") str)]
+          (log/info (str "POST " url))
+          @(http/post url {:content-type :json :form-params {:secret (:secret config)}})
+          (reset! server-atom nil)
+          (.close server)
+          (netty/wait-for-close server)
+          (log/info "Stopped Mangadex@Home node"))))
 
     (add-watch
       tls-atom :tls-update
@@ -200,6 +202,7 @@
                            http-handler
                            {:port (:https-port config)
                             :ssl-context ssl-ctx
+                            :executor main-executor
                             :shutdown-executor? false
                             :pipeline-transform 
                             (fn [pipeline]
@@ -292,7 +295,10 @@
         (log/info "Shutting down...")
         (shutdown-node)
         (.close cache)
-        (.shutdownNow executor)
+        (.shutdownNow limit-executor)
+        (.shutdownNow main-executor)
+        (log/info "Finishing up requests... (timeout = 10s)")
+        (.awaitTermination main-executor 10 TimeUnit/SECONDS)
         ))
   ))
 
