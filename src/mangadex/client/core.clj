@@ -24,7 +24,8 @@
             [influxdb.client :as influx]
             [influxdb.convert :refer [point->line]]
             )
-  (:import [java.util Base64]
+  (:import [java.io BufferedInputStream]
+           [java.util Base64]
            [java.util.concurrent Executors TimeUnit]
            [javax.xml.bind DatatypeConverter]
            [javax.crypto Cipher CipherInputStream CipherOutputStream]
@@ -84,6 +85,11 @@
    :file-logging false
    })
 
+(def static-headers
+  {"cache-control"        "public, max-age=604800, immutable"
+   "timing-allow-origin"  "https://mangadex.org"
+   })
+
 (defn -main [config-file]
 
   ;; Global exception handler
@@ -123,9 +129,9 @@
                    (if (or (-> req :headers (get "if-none-match"))
                            (-> req :headers (get "if-modified-since")))
                      {:status 304}
-                     {:body (-> entry (.getInputStream 0) (CipherInputStream. rc4))
-                      :headers (-> (-> entry (.getString 1) decode64 nippy/thaw)
-                                   (assoc "cache-control" "public, max-age=604800, immutable"))}))
+                     {:body (-> entry (.getInputStream 0) (BufferedInputStream. (* 16 1024)) (CipherInputStream. rc4))
+                      :headers (-> entry (.getString 1) decode64 nippy/thaw (merge static-headers))
+                      }))
                ;; Cache Miss ============================================================
                (if (not (contains? #{"data" "data-saver"} req-type))
                  {:status 400}
@@ -149,7 +155,7 @@
                                           cache-stream (-> cache-entry
                                                            (.newOutputStream 0)
                                                            (CipherOutputStream. rc4))
-                                          in-stream (convert body (stream-of bytes) {:chunk-size 4096})
+                                          in-stream (convert body (stream-of bytes) {:chunk-size (* 16 1024)})
                                           out-stream (buffered-stream alength content-length)
                                           ]
                                       (consume
@@ -171,8 +177,7 @@
                                             (do (.abort cache-entry)
                                                 (log/warn (str "Cache abort: " chapter "/" image))))))
                                       {:body out-stream
-                                       :headers (assoc stored-headers "cache-control"
-                                                       "public, max-age=604800, immutable")})))
+                                       :headers (merge stored-headers static-headers)})))
                                 ))))
                ))))
 
