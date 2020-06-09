@@ -222,6 +222,7 @@
       (let [q "SELECT LAST(request), LAST(hit), LAST(egress) FROM mangadex"
             resp (influx/unwrap (influx/query {:url influx-url} ::influx/read q {:db "mangadex"}))
             [{[{[[_ req hit egress]] "values"}] "series"}] resp]
+        (log/info "Restore metrics req=" req " hit=" hit " egress=" egress)
         (when req (swap! request-count + req))
         (when hit (swap! hit-count + hit))
         (when egress (reset! egress-prev egress)))
