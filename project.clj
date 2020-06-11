@@ -1,4 +1,4 @@
-(defproject network.mangadex/md-client "1.2.5"
+(defproject network.mangadex/md-client "1.2.6"
   :description "Mangadex@Home Client"
   :dependencies [[org.clojure/clojure "1.10.1"]
                  [environ "1.2.0"]
