@@ -145,7 +145,7 @@
                                   (cond
                                     (not= status 200)     {:body body :headers headers}
                                     (not content-length)  {:body body :headers headers}
-                                    (not cache-entry)     {:status 500}
+                                    (not cache-entry)     {:body body :headers headers}
                                     :else
                                     (let [stored-headers (select-keys headers ["content-length"
                                                                                "content-type"
